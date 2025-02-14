@@ -4,7 +4,7 @@ const db = require('../db');
 
 
 router.get('/reports', (req, res) => {
-    const query = 'SELECT * FROM movements';
+    const query = 'SELECT * FROM transactions';
     db.query(query, (err, results) => {
         if (err) {
             return res.status(500).send('Erro ao buscar os dados.');

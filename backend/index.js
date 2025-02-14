@@ -6,14 +6,13 @@ const reportsRoute = require('./routes/reports');
 require('dotenv').config();
 
 const app = express();
-const loginRoute = require('./routes/login');
+
 
 
 app.use(cors());
 app.use(express.json());
 app.use('/api', uploadRoute); 
 app.use('/api', reportsRoute);
-app.use('/api', loginRoute);
 
 
 app.get('/', (req, res) => {
