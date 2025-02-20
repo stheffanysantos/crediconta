@@ -5,15 +5,15 @@ const fs = require('fs');
 const csv = require('csv-parser');
 const db = require('../db');
 const { parse, isValid, format } = require('date-fns');
-const { pt } = require('date-fns/locale'); // Importando o locale para datas em português
-const { Readable } = require('stream'); // Importa o Readable stream do Node.js
+const { pt } = require('date-fns/locale');
+const { Readable } = require('stream');
 
 const router = express.Router();
 
 // Configuração do multer para armazenar arquivos em memória
 const storage = multer.memoryStorage({
   destination: (req, file, cb) => {
-    cb(null, 'uploads/'); // Não estamos usando o caminho aqui porque o arquivo está na memória
+    cb(null, 'uploads/');
   },
   filename: (req, file, cb) => {
     cb(null, `${Date.now()}-${file.originalname}`);
@@ -43,19 +43,6 @@ const formatDate = (date) => {
 
   return format(parsedDate, 'yyyy-MM-dd HH:mm:ss'); // Formato esperado pelo banco
 };
-
-// Rota para buscar os últimos arquivos importados
-router.get('/imports', async (req, res) => {
-  try {
-    const [importedFiles] = await db.promise().query(
-      `SELECT filename, upload_date FROM imported_files ORDER BY upload_date DESC LIMIT 5`
-    );
-    res.json({ arquivosImportados: importedFiles });
-  } catch (error) {
-    console.error('❌ Erro ao buscar arquivos importados:', error);
-    res.status(500).send('Erro ao buscar arquivos importados.');
-  }
-});
 
 // Rota para o upload do CSV
 router.post('/upload', upload.single('arquivo'), async (req, res) => {
@@ -156,30 +143,97 @@ router.post('/upload', upload.single('arquivo'), async (req, res) => {
             );
             insertedCount++;
             console.log(`✅ Nova venda inserida: ${JSON.stringify(row)}`);
+
+            // Implementando a lógica da trigger aqui no backend
+
+            // Obtendo o idzeus do cliente com base na maquininha utilizada na transação
+            const [clientResult] = await db.promise().query(
+              `SELECT idzeus FROM movements WHERE NumeroSerie = ? OR NumeroSerie2 = ? LIMIT 1`,
+              [row.numeroserie, row.numeroserie]
+            );
+            const IdZeusCliente = clientResult[0]?.idzeus;
+
+            if (IdZeusCliente) {
+              // Calculando o total sem porcentagem (soma de todas as transações por maquininha)
+              const [totalSemPorcentagemResult] = await db.promise().query(
+                `SELECT COALESCE(SUM(valorbruto), 0) AS Total_Sem_Porcentagem FROM transactions 
+                 WHERE NumeroSerie IN (
+                   SELECT NumeroSerie FROM movements WHERE idzeus = ? 
+                   UNION 
+                   SELECT NumeroSerie2 FROM movements WHERE idzeus = ?
+                 )`,
+                [IdZeusCliente, IdZeusCliente]
+              );
+              const Total_Sem_Porcentagem = totalSemPorcentagemResult[0]?.Total_Sem_Porcentagem || 0;
+
+              // Calculando o total com a porcentagem aplicada
+              const [totalComPorcentagemResult] = await db.promise().query(
+                `SELECT COALESCE(SUM(t.valorbruto - (t.valorbruto * h.percentage)), 0) AS Total_Com_Porcentagem 
+                 FROM transactions t
+                 INNER JOIN historicocredito h ON 
+                   (t.produto LIKE 'Crédito%' AND h.tipo = 'Credito') OR 
+                   (t.produto LIKE 'Débito%' AND h.tipo = 'Debito') OR 
+                   (t.produto = 'Voucher' AND h.tipo = 'Alimentacao')
+                 WHERE t.NumeroSerie IN (
+                   SELECT NumeroSerie FROM movements WHERE idzeus = ? 
+                   UNION 
+                   SELECT NumeroSerie2 FROM movements WHERE idzeus = ?
+                 )`,
+                [IdZeusCliente, IdZeusCliente]
+              );
+              const Total_Com_Porcentagem = totalComPorcentagemResult[0]?.Total_Com_Porcentagem || 0;
+
+              // Calculando a diferença entre os valores
+              const Diferenca_Total = Total_Sem_Porcentagem - Total_Com_Porcentagem;
+
+              // Inserindo os valores calculados na tabela `totcredito`
+              await db.promise().query(
+                `INSERT INTO totcredito (NumeroSerie, Total_Sem_Porcentagem, Total_Com_Porcentagem, Diferenca_Total) 
+                 VALUES (?, ?, ?, ?) 
+                 ON DUPLICATE KEY UPDATE 
+                   Total_Sem_Porcentagem = VALUES(Total_Sem_Porcentagem), 
+                   Total_Com_Porcentagem = VALUES(Total_Com_Porcentagem), 
+                   Diferenca_Total = VALUES(Diferenca_Total)`,
+                [row.numeroserie, Total_Sem_Porcentagem, Total_Com_Porcentagem, Diferenca_Total]
+              );
+
+              // Atualizando os valores na tabela `movements`
+              await db.promise().query(
+                `UPDATE movements
+                 SET Total = ?, TotalPorcentage = ?
+                 WHERE idzeus = ?`,
+                [Total_Sem_Porcentagem, Total_Com_Porcentagem, IdZeusCliente]
+              );
+            }
           }
         } catch (err) {
           console.error('❌ Erro ao inserir no banco:', err.sqlMessage || err);
         }
       }
-
-      // Busca os últimos arquivos importados
-      try {
-        const [importedFiles] = await db.promise().query(
-          `SELECT filename, upload_date FROM imported_files ORDER BY upload_date DESC LIMIT 5`
-        );
-        res.send({
-          message: `CSV processado! Novos registros: ${insertedCount}, Duplicados ignorados: ${skippedCount}`,
-          arquivosImportados: importedFiles,
-        });
-      } catch (error) {
-        console.error('❌ Erro ao buscar arquivos importados:', error);
-        res.status(500).send('Erro ao buscar arquivos importados.');
-      }
+      res.send({
+        message: `CSV processado! Novos registros: ${insertedCount}, Duplicados ignorados: ${skippedCount}`,
+      });
     })
     .on('error', (err) => {
       console.error('❌ Erro no processamento do CSV:', err);
       res.status(500).send('Erro ao processar o arquivo.');
     });
+});
+
+router.get('/imports', async (req, res) => {
+  try {
+    const [importedFiles] = await db.promise().query(
+      `SELECT filename, upload_date FROM imported_files ORDER BY upload_date DESC LIMIT 5`
+    );
+    
+    res.send({
+      message: `Arquivos importados:`,
+      arquivosImportados: importedFiles,
+    });
+  } catch (error) {
+    console.error('❌ Erro ao buscar arquivos importados:', error);
+    res.status(500).send('Erro ao buscar arquivos importados.');
+  }
 });
 
 module.exports = router;

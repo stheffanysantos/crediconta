@@ -90,8 +90,6 @@ INNER JOIN historicocredito h
 GROUP BY t.NumeroSerie;
 
 
-
-
 DELIMITER $$
 
 CREATE TRIGGER after_transaction_insert
@@ -101,43 +99,59 @@ BEGIN
     DECLARE Total_Sem_Porcentagem DECIMAL(10,2);
     DECLARE Total_Com_Porcentagem DECIMAL(10,2);
     DECLARE Diferenca_Total DECIMAL(10,2);
+    DECLARE IdZeusCliente INT;
+
+    -- Obtendo o idzeus do cliente com base na maquininha utilizada na transação
+    SELECT idzeus INTO IdZeusCliente
+    FROM movements
+    WHERE NumeroSerie = NEW.NumeroSerie OR NumeroSerie2 = NEW.NumeroSerie
+    LIMIT 1;
 
     -- Calculando o total sem porcentagem (soma de todas as transações por maquininha)
     SELECT COALESCE(SUM(valorbruto), 0)
-    INTO total_sem_porcentagem
+    INTO Total_Sem_Porcentagem
     FROM transactions 
-    WHERE NumeroSerie = NEW.NumeroSerie;
+    WHERE NumeroSerie IN (
+        SELECT NumeroSerie FROM movements WHERE idzeus = IdZeusCliente
+        UNION
+        SELECT NumeroSerie2 FROM movements WHERE idzeus = IdZeusCliente
+    );
 
     -- Calculando o total com a porcentagem aplicada
     SELECT COALESCE(SUM(t.valorbruto - (t.valorbruto * h.percentage)), 0)
-    INTO total_com_porcentagem
+    INTO Total_Com_Porcentagem
     FROM transactions t
     INNER JOIN historicocredito h 
         ON (t.produto LIKE 'Crédito%' AND h.tipo = 'Credito')
         OR (t.produto LIKE 'Débito%' AND h.tipo = 'Debito')
         OR (t.produto = 'Voucher' AND h.tipo = 'Alimentacao')
-    WHERE t.NumeroSerie = NEW.NumeroSerie;
+    WHERE t.NumeroSerie IN (
+        SELECT NumeroSerie FROM movements WHERE idzeus = IdZeusCliente
+        UNION
+        SELECT NumeroSerie2 FROM movements WHERE idzeus = IdZeusCliente
+    );
 
     -- Calculando a diferença entre os valores
-    SET diferenca_total = total_sem_porcentagem - total_com_porcentagem;
+    SET Diferenca_Total = Total_Sem_Porcentagem - Total_Com_Porcentagem;
 
     -- Inserindo os valores calculados na tabela `totcredito`
     INSERT INTO totcredito (NumeroSerie, Total_Sem_Porcentagem, Total_Com_Porcentagem, Diferenca_Total)
     VALUES (NEW.NumeroSerie, Total_Sem_Porcentagem, Total_Com_Porcentagem, Diferenca_Total)
     ON DUPLICATE KEY UPDATE 
-        Total_Sem_Porcentagem = Total_Sem_Porcentagem,
-        Total_Com_Porcentagem = Total_Com_Porcentagem,
-        Diferenca_Total = Diferenca_Total;
+        Total_Sem_Porcentagem = VALUES(Total_Sem_Porcentagem),
+        Total_Com_Porcentagem = VALUES(Total_Com_Porcentagem),
+        Diferenca_Total = VALUES(Diferenca_Total);
 
-    -- Atualizando os valores na tabela `movements`
+    -- Atualizando os valores na tabela `movements`, somando as duas maquininhas do mesmo cliente
     UPDATE movements
     SET Total = Total_Sem_Porcentagem,
         TotalPorcentage = Total_Com_Porcentagem
-    WHERE NumeroSerie = NEW.NumeroSerie;
+    WHERE idzeus = IdZeusCliente;
 END$$
 
 DELIMITER ;
 
 
 
-
+UPDATE movements
+SET Status = 'Ativo', Maquininha = 'Stone';
